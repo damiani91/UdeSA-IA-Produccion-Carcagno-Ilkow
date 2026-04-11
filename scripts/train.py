@@ -12,7 +12,8 @@ import argparse
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", required=True)
-    parser.add_argument("--raw-data", default="data/raw/produccion.csv")
+    _root = Path(__file__).resolve().parent.parent
+    parser.add_argument("--raw-data", default=str(_root / "data" / "raw" / "produccion.csv"))
     args = parser.parse_args()
 
     # 1. Feature Pipeline
