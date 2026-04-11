@@ -1,4 +1,6 @@
-"""Feature engineering siguiendo el patrón de la práctica de Feature Stores.
+"""
+Script para cálculo de features.
+
 
 Features de ventana (últimas N lecturas por pozo) — alineado con clase 3:
 - avg_prod_gas_10m, avg_prod_pet_10m
