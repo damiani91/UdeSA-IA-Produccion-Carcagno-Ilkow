@@ -36,6 +36,8 @@ class ForecastService:
         self.store = FeatureStore(repo_path=FEATURE_STORE_REPO)
         # También cargar offline features para forecast autoregresivo
         self.features_df = pd.read_parquet(f"{FEATURE_STORE_REPO}/data/well_features.parquet")
+        # Computar la mediana global de features para evitar sesgar la imputación artificialmente con 0.0
+        self.feature_medians = self.features_df[FEATURE_COLS].median()
 
     def predict(self, id_well: str, date_start: str, date_end: str) -> list[dict]:
         """Genera forecast usando online features (clase 3) + autoregresivo."""
@@ -58,15 +60,21 @@ class ForecastService:
             ]
 
             if not well_data.empty:
-                X = well_data[FEATURE_COLS].values
+                X_df = well_data[FEATURE_COLS]
             elif not online_features.empty:
                 # Usar online features como fallback
-                X = online_features[FEATURE_COLS].values
+                X_df = online_features[FEATURE_COLS]
             else:
                 results.append({"date": target_date.strftime("%Y-%m-%d"), "prod": 0.0})
                 continue
 
+            # Imputar valores nulos con la mediana poblacional para no sesgar
+            X_df = X_df.fillna(self.feature_medians)
+            X = X_df.values
+
+            # Reemplazar infinitos u otros casos residuales por las dudas
             X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+            
             pred = float(self.model.predict(X)[0])
             results.append({
                 "date": target_date.strftime("%Y-%m-%d"),
