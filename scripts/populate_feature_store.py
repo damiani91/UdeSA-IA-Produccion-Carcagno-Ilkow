@@ -8,14 +8,17 @@ Flujo:
 """
 
 import subprocess
+from pathlib import Path
+
 import pandas as pd
 from feast import FeatureStore
 from src.feature_pipeline.ingestion import load_production_data
 from src.feature_pipeline.feature_engineering import compute_features
 
-FEATURE_STORE_REPO = "feature_store"
-PARQUET_PATH = f"{FEATURE_STORE_REPO}/data/well_features.parquet"
-PROD_FILE = "data/raw/produccion.csv"
+ROOT = Path(__file__).resolve().parent.parent
+FEATURE_STORE_REPO = ROOT / "feature_store"
+PARQUET_PATH = FEATURE_STORE_REPO / "data" / "well_features.parquet"
+PROD_FILE = ROOT / "data" / "raw" / "produccion.csv"
 
 
 def prepare_offline_store(up_to_date: str | None = None):
@@ -39,7 +42,7 @@ def prepare_offline_store(up_to_date: str | None = None):
 
 def apply_feast():
     """Registra las definiciones de Feast (feast apply)."""
-    subprocess.run(["feast", "apply"], cwd=FEATURE_STORE_REPO, check=True)
+    subprocess.run(["feast", "apply"], cwd=str(FEATURE_STORE_REPO), check=True)
     print("Feast apply completado.")
 
 
@@ -54,7 +57,7 @@ def populate_online_store():
     # Última lectura de cada pozo (la más reciente)
     latest_df = feat_df.sort_values("fecha").groupby("idpozo").tail(1)
 
-    store = FeatureStore(repo_path=FEATURE_STORE_REPO)
+    store = FeatureStore(repo_path=str(FEATURE_STORE_REPO))
     store.write_to_online_store(
         feature_view_name="well_stats",
         df=latest_df,
