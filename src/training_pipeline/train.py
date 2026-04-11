@@ -41,7 +41,7 @@ def train_model(
     experiment_name: str = "well_production_forecast",
     model_type: str = "gradient_boosting",
     model_params: dict | None = None,
-) -> str:
+) -> str | None:
     """Entrena un modelo leyendo del Feature Store (offline).
 
     get_historical_features() para training data.
@@ -50,94 +50,102 @@ def train_model(
     mlflow.set_tracking_uri(mlflow_tracking_uri)
     mlflow.set_experiment(experiment_name)
 
-    # 1. Leer del Feature Store offline (patrón clase 3)
-    store = FeatureStore(repo_path=FEATURE_STORE_REPO)
-    raw_df = pd.read_parquet(PARQUET_PATH)
+    try:
+        # 1. Leer del Feature Store offline (patrón clase 3)
+        store = FeatureStore(repo_path=FEATURE_STORE_REPO)
+        raw_df = pd.read_parquet(PARQUET_PATH)
 
-    # Filtrar hasta training_date
-    raw_df = raw_df[raw_df["fecha"] <= pd.Timestamp(training_date)]
+        # Filtrar hasta training_date
+        raw_df = raw_df[raw_df["fecha"] <= pd.Timestamp(training_date)]
 
-    # Preparar entity_df para get_historical_features
-    entity_df = raw_df[["idpozo", "fecha", TARGET]].copy()
-    entity_df["fecha"] = pd.to_datetime(entity_df["fecha"])
-    entity_df = entity_df.rename(columns={"fecha": "event_timestamp"})
+        # Preparar entity_df para get_historical_features
+        entity_df = raw_df[["idpozo", "fecha", TARGET]].copy()
+        entity_df["fecha"] = pd.to_datetime(entity_df["fecha"])
+        entity_df = entity_df.rename(columns={"fecha": "event_timestamp"})
 
-    print("Obteniendo features históricas desde el Feature Store...")
-    training_df = store.get_historical_features(
-        entity_df=entity_df,
-        features=FEAST_FEATURES,
-    ).to_df()
+        print("Obteniendo features históricas desde el Feature Store...")
+        training_df = store.get_historical_features(
+            entity_df=entity_df,
+            features=FEAST_FEATURES,
+        ).to_df()
 
-    # Feast puede agregar prefijos, removerlos
-    training_df.columns = [c.split("__")[-1] for c in training_df.columns]
+        # Feast puede agregar prefijos, removerlos
+        training_df.columns = [c.split("__")[-1] for c in training_df.columns]
 
-    # Limpiar
-    training_df = training_df.dropna(subset=[TARGET])
-    training_df = training_df.dropna(subset=FEATURE_COLS)
-    training_df = training_df.replace([np.inf, -np.inf], np.nan).dropna(subset=FEATURE_COLS)
+        # Limpiar
+        training_df = training_df.dropna(subset=[TARGET])
+        training_df = training_df.dropna(subset=FEATURE_COLS)
+        training_df = training_df.replace([np.inf, -np.inf], np.nan).dropna(subset=FEATURE_COLS)
 
-    # 2. Split temporal
-    cutoff = pd.Timestamp(training_date) - pd.DateOffset(months=3)
-    train_mask = training_df["event_timestamp"] <= cutoff
-    val_mask = training_df["event_timestamp"] > cutoff
+        # 2. Split temporal
+        cutoff = pd.Timestamp(training_date) - pd.DateOffset(months=3)
+        train_mask = training_df["event_timestamp"] <= cutoff
+        val_mask = training_df["event_timestamp"] > cutoff
 
-    X_train = training_df.loc[train_mask, FEATURE_COLS]
-    y_train = training_df.loc[train_mask, TARGET]
-    X_val = training_df.loc[val_mask, FEATURE_COLS]
-    y_val = training_df.loc[val_mask, TARGET]
+        X_train = training_df.loc[train_mask, FEATURE_COLS]
+        y_train = training_df.loc[train_mask, TARGET]
+        X_val = training_df.loc[val_mask, FEATURE_COLS]
+        y_val = training_df.loc[val_mask, TARGET]
 
-    # 3. Entrenar con MLflow (clase 2: autolog + params manuales)
-    if model_params is None:
-        model_params = {"n_estimators": 200, "max_depth": 5, "random_state": 42}
+        # 3. Entrenar con MLflow (clase 2: autolog + params manuales)
+        if model_params is None:
+            model_params = {"n_estimators": 200, "max_depth": 5, "random_state": 42}
 
-    # Autolog captura métricas, parámetros y modelo automáticamente (clase 2)
-    mlflow.sklearn.autolog(log_models=True)
+        # Autolog captura métricas, parámetros y modelo automáticamente (clase 2)
+        mlflow.sklearn.autolog(log_models=True)
 
-    with mlflow.start_run() as run:
-        # Params manuales adicionales (clase 2: log_param)
-        mlflow.log_param("training_date", training_date)
-        mlflow.log_param("model_type", model_type)
-        mlflow.log_param("n_wells", int(training_df["idpozo"].nunique()))
-        mlflow.log_param("n_samples_train", len(X_train))
-        mlflow.log_param("n_samples_val", len(X_val))
-        mlflow.log_param("features", str(FEATURE_COLS))
+        with mlflow.start_run() as run:
+            # Params manuales adicionales (clase 2: log_param)
+            mlflow.log_param("training_date", training_date)
+            mlflow.log_param("model_type", model_type)
+            mlflow.log_param("n_wells", int(training_df["idpozo"].nunique()))
+            mlflow.log_param("n_samples_train", len(X_train))
+            mlflow.log_param("n_samples_val", len(X_val))
+            mlflow.log_param("features", str(FEATURE_COLS))
 
-        # Seleccionar modelo
-        if model_type == "random_forest":
-            model = RandomForestRegressor(**model_params)
-        else:
-            model = GradientBoostingRegressor(
-                learning_rate=0.1, **model_params
+            # Seleccionar modelo
+            if model_type == "random_forest":
+                model = RandomForestRegressor(**model_params)
+            else:
+                model = GradientBoostingRegressor(
+                    learning_rate=0.1, **model_params
+                )
+
+            model.fit(X_train, y_train)
+
+            # Métricas de validación (autolog captura training, agregamos val)
+            y_val_pred = model.predict(X_val)
+            mlflow.log_metric("val_mae", mean_absolute_error(y_val, y_val_pred))
+            mlflow.log_metric("val_rmse", mean_squared_error(y_val, y_val_pred, squared=False))
+
+            nonzero = y_val != 0
+            if nonzero.any():
+                mape = float((abs(y_val[nonzero] - y_val_pred[nonzero]) / y_val[nonzero]).mean() * 100)
+                mlflow.log_metric("val_mape", mape)
+
+            # Registrar modelo en Model Registry (clase 2: ciclo de vida)
+            mlflow.sklearn.log_model(
+                model, artifact_path="model",
+                registered_model_name="well_production_model",
             )
 
-        model.fit(X_train, y_train)
+            # Feature importances como artefacto
+            import matplotlib; matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(10, 6))
+            pd.Series(model.feature_importances_, index=FEATURE_COLS).sort_values().plot.barh(ax=ax)
+            ax.set_title("Feature Importances")
+            fig.tight_layout()
+            fig.savefig("/tmp/feature_importances.png", dpi=100)
+            mlflow.log_artifact("/tmp/feature_importances.png")
+            plt.close()
 
-        # Métricas de validación (autolog captura training, agregamos val)
-        y_val_pred = model.predict(X_val)
-        mlflow.log_metric("val_mae", mean_absolute_error(y_val, y_val_pred))
-        mlflow.log_metric("val_rmse", mean_squared_error(y_val, y_val_pred, squared=False))
+            print(f"Run ID: {run.info.run_id}")
+            return run.info.run_id
 
-        nonzero = y_val != 0
-        if nonzero.any():
-            mape = float((abs(y_val[nonzero] - y_val_pred[nonzero]) / y_val[nonzero]).mean() * 100)
-            mlflow.log_metric("val_mape", mape)
-
-        # Registrar modelo en Model Registry (clase 2: ciclo de vida)
-        mlflow.sklearn.log_model(
-            model, artifact_path="model",
-            registered_model_name="well_production_model",
-        )
-
-        # Feature importances como artefacto
-        import matplotlib; matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(figsize=(10, 6))
-        pd.Series(model.feature_importances_, index=FEATURE_COLS).sort_values().plot.barh(ax=ax)
-        ax.set_title("Feature Importances")
-        fig.tight_layout()
-        fig.savefig("/tmp/feature_importances.png", dpi=100)
-        mlflow.log_artifact("/tmp/feature_importances.png")
-        plt.close()
-
-        print(f"Run ID: {run.info.run_id}")
-        return run.info.run_id
+    except Exception as e:
+        print(f"Error en training pipeline: {e}")
+        # Terminar activamente cualquier run de MLflow abortado
+        if mlflow.active_run():
+            mlflow.end_run(status="FAILED")
+        return None
