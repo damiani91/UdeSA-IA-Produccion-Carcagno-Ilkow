@@ -1,0 +1,70 @@
+version: "3.8"
+
+services:
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.0.1
+    ports:
+      - "5000:5000"
+    command: mlflow server --host 0.0.0.0 --backend-store-uri sqlite:///mlflow.db
+    volumes:
+      - mlflow_data:/mlflow
+    networks:
+      - ml-network
+
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
+      POSTGRES_DB: ${DB_NAME:-wells_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ml-network
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mlflow
+      - postgres
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      DB_HOST: postgres
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-password}
+    volumes:
+      - .:/app
+    networks:
+      - ml-network
+    command: python scripts/serve.py
+
+  airflow:
+    build:
+      context: .
+      dockerfile: docker/airflow.Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    environment:
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://postgres:${DB_PASSWORD:-password}@postgres:5432/${DB_NAME:-wells_db}
+    volumes:
+      - ./orchestration/dags:/opt/airflow/dags
+      - ./orchestration/logs:/opt/airflow/logs
+    networks:
+      - ml-network
+
+volumes:
+  mlflow_data:
+  postgres_data:
+
+networks:
+  ml-network:
+    driver: bridge
