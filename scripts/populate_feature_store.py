@@ -15,7 +15,7 @@ from src.feature_pipeline.feature_engineering import compute_features
 
 FEATURE_STORE_REPO = "feature_store"
 PARQUET_PATH = f"{FEATURE_STORE_REPO}/data/well_features.parquet"
-PROD_FILE = "data/raw/produccin-de-pozos-de-gas-y-petrleo-no-convencional.csv"
+PROD_FILE = "data/raw/produccion.csv"
 
 
 def prepare_offline_store(up_to_date: str | None = None):
