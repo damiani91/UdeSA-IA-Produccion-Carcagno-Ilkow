@@ -1,12 +1,17 @@
 """Uso: python scripts/train.py --date 2024-12-01"""
 
+import sys
+from pathlib import Path
+
+# Agrega la raíz del proyecto al path para poder importar scripts.* y src.*
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", required=True)
-    parser.add_argument("--raw-data",
-                        default="data/raw/produccin-de-pozos-de-gas-y-petrleo-no-convencional.csv")
+    parser.add_argument("--raw-data", default="data/raw/produccion.csv")
     args = parser.parse_args()
 
     # 1. Feature Pipeline
