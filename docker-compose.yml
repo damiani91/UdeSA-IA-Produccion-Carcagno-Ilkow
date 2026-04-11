@@ -1,71 +1,105 @@
-version: "3.8"
+# docker-compose.yml
+version: "3.9"
 
 services:
-  mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.0.1
-    ports:
-      - "5000:5000"
-    command: mlflow server --host 0.0.0.0 --backend-store-uri sqlite:///mlflow.db
-    volumes:
-      - mlflow_data:/mlflow
-    networks:
-      - ml-network
-
   postgres:
-    image: postgres:13
+    image: postgres:16-alpine
     environment:
-      POSTGRES_USER: ${DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
-      POSTGRES_DB: ${DB_NAME:-wells_db}
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: mlflow
+      POSTGRES_DB: mlflow
+    volumes: [ postgres_data:/var/lib/postgresql/data ]
+    ports: [ "5432:5432" ]
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U mlflow" ]
+      interval: 5s
+      retries: 5
+
+  # MLflow — siguiendo setup de clase 2
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.12.1
+    depends_on:
+      postgres: { condition: service_healthy }
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - ml-network
+      - mlflow_artifacts:/mlflow/artifacts
+    ports: [ "5000:5000" ]
+    command: >
+      mlflow server --backend-store-uri postgresql://mlflow:mlflow@postgres:5432/mlflow --default-artifact-root /mlflow/artifacts --host 0.0.0.0 --port 5000
 
   api:
-    build:
-      context: .
-      dockerfile: docker/api.Dockerfile
-    ports:
-      - "8000:8000"
-    depends_on:
-      - mlflow
-      - postgres
+    build: { context: ., dockerfile: docker/api.Dockerfile }
+    depends_on: [ mlflow ]
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
-      DB_HOST: postgres
-      DB_USER: ${DB_USER:-postgres}
-      DB_PASSWORD: ${DB_PASSWORD:-password}
+    ports: [ "8000:8000" ]
     volumes:
-      - .:/app
-    networks:
-      - ml-network
-    command: python scripts/serve.py
+      - ./feature_store:/app/feature_store
+      - mlflow_artifacts:/mlflow/artifacts
 
-  airflow:
-    build:
-      context: .
-      dockerfile: docker/airflow.Dockerfile
-    ports:
-      - "8080:8080"
-    depends_on:
-      - postgres
+  training:
+    build: { context: ., dockerfile: docker/training.Dockerfile }
+    depends_on: [ mlflow ]
     environment:
-      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://postgres:${DB_PASSWORD:-password}@postgres:5432/${DB_NAME:-wells_db}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./data:/app/data
+      - ./feature_store:/app/feature_store
+      - mlflow_artifacts:/mlflow/artifacts
+    profiles: [ training ]
+
+  # Airflow — TaskFlow API (clase 1)
+  airflow-webserver:
+    image: apache/airflow:2.9.1-python3.11
+    depends_on: [ postgres, mlflow ]
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://mlflow:mlflow@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      _PIP_ADDITIONAL_REQUIREMENTS: "pandas scikit-learn mlflow feast evidently"
     volumes:
       - ./orchestration/dags:/opt/airflow/dags
-      - ./orchestration/logs:/opt/airflow/logs
-    networks:
-      - ml-network
+      - ./src:/opt/airflow/src
+      - ./feature_store:/opt/airflow/feature_store
+      - ./data:/opt/airflow/data
+      - ./scripts:/opt/airflow/scripts
+    ports: [ "8080:8080" ]
+    command: >
+      bash -c "airflow db init &&
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com &&
+        airflow webserver"
+    profiles: [ orchestration ]
+
+  airflow-scheduler:
+    image: apache/airflow:2.9.1-python3.11
+    depends_on: [ airflow-webserver ]
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://mlflow:mlflow@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      _PIP_ADDITIONAL_REQUIREMENTS: "pandas scikit-learn mlflow feast evidently"
+    volumes:
+      - ./orchestration/dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./feature_store:/opt/airflow/feature_store
+      - ./data:/opt/airflow/data
+      - ./scripts:/opt/airflow/scripts
+    command: airflow scheduler
+    profiles: [ orchestration ]
+
+  ray-head:
+    image: rayproject/ray:2.10.0-py311
+    ports: [ "8265:8265", "8001:8001" ]
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./src:/app/src
+      - ./feature_store:/app/feature_store
+      - mlflow_artifacts:/mlflow/artifacts
+    command: bash -c "ray start --head --dashboard-host 0.0.0.0 && sleep infinity"
+    profiles: [ serving ]
 
 volumes:
-  mlflow_data:
   postgres_data:
-
-
-networks:
-  ml-network:
-    driver: bridge
+  mlflow_artifacts:
