@@ -1,8 +1,8 @@
 project: oil_gas_production
-registry: /app/feature_store/registry/registry.db
+registry: registry/registry.db
 provider: local
 offline_store:
   type: file
 online_store:
   type: sqlite
-  path: /app/feature_store/online_store/online.db
+  path: online_store/online.db

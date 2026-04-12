@@ -35,6 +35,7 @@ services:
     depends_on: [ mlflow ]
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
     ports: [ "8000:8000" ]
     volumes:
       - ./feature_store:/app/feature_store
@@ -45,6 +46,7 @@ services:
     depends_on: [ mlflow ]
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
     volumes:
       - ./data:/app/data
       - ./feature_store:/app/feature_store
