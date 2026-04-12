@@ -116,7 +116,7 @@ def train_model(
             # Métricas de validación (autolog captura training, agregamos val)
             y_val_pred = model.predict(X_val)
             mlflow.log_metric("val_mae", mean_absolute_error(y_val, y_val_pred))
-            mlflow.log_metric("val_rmse", mean_squared_error(y_val, y_val_pred, squared=False))
+            mlflow.log_metric("val_rmse", np.sqrt(mean_squared_error(y_val, y_val_pred)))
 
             nonzero = y_val != 0
             if nonzero.any():
