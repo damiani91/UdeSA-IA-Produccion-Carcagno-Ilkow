@@ -78,7 +78,7 @@ def train_model(
         training_df = training_df.replace([np.inf, -np.inf], np.nan).dropna(subset=FEATURE_COLS)
 
         # 2. Split temporal
-        cutoff = pd.Timestamp(training_date) - pd.DateOffset(months=3)
+        cutoff = pd.Timestamp(training_date, tz="UTC") - pd.DateOffset(months=3)
         train_mask = training_df["event_timestamp"] <= cutoff
         val_mask = training_df["event_timestamp"] > cutoff
 

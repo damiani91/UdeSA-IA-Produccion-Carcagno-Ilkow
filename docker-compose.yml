@@ -24,11 +24,18 @@ services:
       - mlflow_artifacts:/mlflow/artifacts
     ports: [ "5000:5000" ]
     command: >
+      bash -c "pip install psycopg2-binary -q &&
       mlflow server
       --backend-store-uri postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       --default-artifact-root /mlflow/artifacts
       --host 0.0.0.0
-      --port 5000
+      --port 5000"
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')" ]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
 
   api:
     build: { context: ., dockerfile: docker/api.Dockerfile }
@@ -43,7 +50,8 @@ services:
 
   training:
     build: { context: ., dockerfile: docker/training.Dockerfile }
-    depends_on: [ mlflow ]
+    depends_on:
+      mlflow: { condition: service_healthy }
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
