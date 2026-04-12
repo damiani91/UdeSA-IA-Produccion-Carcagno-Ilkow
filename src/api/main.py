@@ -1,7 +1,7 @@
 # src/api/main.py
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from src.api.routes import forecast, wells
+from src.api import forecast, wells
 from src.inference_pipeline.predict import ForecastService
 
 @asynccontextmanager
