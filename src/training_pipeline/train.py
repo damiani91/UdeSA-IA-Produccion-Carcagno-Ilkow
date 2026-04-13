@@ -8,7 +8,6 @@ import mlflow
 import mlflow.sklearn
 import numpy as np
 import pandas as pd
-from feast import FeatureStore
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
@@ -51,26 +50,16 @@ def train_model(
     mlflow.set_experiment(experiment_name)
 
     try:
-        # 1. Leer del Feature Store offline (patrón clase 3)
-        store = FeatureStore(repo_path=FEATURE_STORE_REPO)
+        # 1. Leer del Feature Store offline (parquet ya tiene todas las features computadas)
         raw_df = pd.read_parquet(PARQUET_PATH)
 
         # Filtrar hasta training_date
         raw_df = raw_df[raw_df["fecha"] <= pd.Timestamp(training_date)]
 
-        # Preparar entity_df para get_historical_features
-        entity_df = raw_df[["idpozo", "fecha", TARGET]].copy()
-        entity_df["fecha"] = pd.to_datetime(entity_df["fecha"])
-        entity_df = entity_df.rename(columns={"fecha": "event_timestamp"})
-
-        print("Obteniendo features históricas desde el Feature Store...")
-        training_df = store.get_historical_features(
-            entity_df=entity_df,
-            features=FEAST_FEATURES,
-        ).to_df()
-
-        # Feast puede agregar prefijos, removerlos
-        training_df.columns = [c.split("__")[-1] for c in training_df.columns]
+        print("Cargando features históricas desde el parquet...")
+        training_df = raw_df[["idpozo", "fecha", TARGET] + FEATURE_COLS].copy()
+        training_df = training_df.rename(columns={"fecha": "event_timestamp"})
+        training_df["event_timestamp"] = pd.to_datetime(training_df["event_timestamp"], utc=True)
 
         # Limpiar
         training_df = training_df.dropna(subset=[TARGET])
