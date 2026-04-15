@@ -27,9 +27,18 @@ def main():
 
     # 2. Training Pipeline
     from src.training_pipeline.train import train_model
+    from src.training_pipeline.registry import promote_model_to_production
     print("=== Training Pipeline ===")
     run_id = train_model(training_date=args.date)
-    print(f"=== Completo. MLflow Run ID: {run_id} ===")
+    print(f"Run ID: {run_id}")
+
+    # 3. Promover modelo a Production en MLflow Registry
+    if run_id:
+        print("=== Promoviendo modelo a Production ===")
+        promote_model_to_production(run_id=run_id)
+        print("=== Completo ===")
+    else:
+        print("=== Training falló, no se promovió el modelo ===")
 
 
 if __name__ == "__main__":
