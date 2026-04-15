@@ -59,6 +59,7 @@ services:
       - ./data:/app/data
       - ./feature_store:/app/feature_store
       - mlflow_artifacts:/mlflow/artifacts
+      - ./.git:/app/.git:ro
     profiles: [ training ]
 
 volumes:
