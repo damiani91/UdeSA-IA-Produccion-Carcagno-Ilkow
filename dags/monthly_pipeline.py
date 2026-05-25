@@ -7,6 +7,14 @@ Training date: first day of the previous month (auto-computed from logical_date)
 Task chain:
     download_data >> prepare_offline_store >> apply_feast >> populate_online_store
     >> train_model >> promote_model >> reload_api
+
+Architecture note:
+    ML tasks (prepare → train → promote) run via ExternalPythonOperator in a
+    separate venv (/home/airflow/project-venv) that has SQLAlchemy 2.x, MLflow,
+    Feast, and scikit-learn. This avoids conflicting with Airflow's own
+    SQLAlchemy 1.4.x installation.
+    Non-ML tasks (download_data, reload_api) use PythonOperator since they only
+    need `requests`, which is already available in Airflow's environment.
 """
 
 from __future__ import annotations
@@ -16,7 +24,9 @@ import sys
 from datetime import datetime, date
 
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.operators.python import PythonOperator, ExternalPythonOperator
+
+PROJECT_PYTHON = "/home/airflow/project-venv/bin/python"
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
@@ -34,10 +44,11 @@ def _ensure_app_in_path():
 
 
 # ─── task callables ───────────────────────────────────────────────────────────
+# download_data and reload_api only need `requests` → PythonOperator (Airflow env)
+# All ML tasks need feast/mlflow/sklearn → ExternalPythonOperator (project venv)
 
 def task_download_data(**context):
     """Download fresh produccion.csv and pozos.csv from datos.gob.ar."""
-    _ensure_app_in_path()
     from pathlib import Path
     import requests
 
@@ -62,8 +73,7 @@ def task_download_data(**context):
         with open(dest, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
                 f.write(chunk)
-        size_mb = dest.stat().st_size / 1e6
-        print(f"  Saved {dest} ({size_mb:.1f} MB)")
+        print(f"  Saved {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
 
 
 def task_prepare_offline_store(**context):
@@ -148,28 +158,33 @@ with DAG(
         python_callable=task_download_data,
     )
 
-    t2 = PythonOperator(
+    t2 = ExternalPythonOperator(
         task_id="prepare_offline_store",
+        python=PROJECT_PYTHON,
         python_callable=task_prepare_offline_store,
     )
 
-    t3 = PythonOperator(
+    t3 = ExternalPythonOperator(
         task_id="apply_feast",
+        python=PROJECT_PYTHON,
         python_callable=task_apply_feast,
     )
 
-    t4 = PythonOperator(
+    t4 = ExternalPythonOperator(
         task_id="populate_online_store",
+        python=PROJECT_PYTHON,
         python_callable=task_populate_online_store,
     )
 
-    t5 = PythonOperator(
+    t5 = ExternalPythonOperator(
         task_id="train_model",
+        python=PROJECT_PYTHON,
         python_callable=task_train_model,
     )
 
-    t6 = PythonOperator(
+    t6 = ExternalPythonOperator(
         task_id="promote_model",
+        python=PROJECT_PYTHON,
         python_callable=task_promote_model,
     )
 
