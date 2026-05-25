@@ -1,6 +1,29 @@
 # docker-compose.yml
 version: "3.9"
 
+x-airflow-common: &airflow-common
+  build: { context: ., dockerfile: docker/airflow.Dockerfile }
+  depends_on:
+    postgres: { condition: service_healthy }
+    mlflow: { condition: service_healthy }
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
+    API_URL: http://api:8000
+    RELOAD_SECRET: ${RELOAD_SECRET}
+    PYTHONPATH: /app
+  volumes:
+    - ./dags:/app/dags
+    - ./data:/app/data
+    - ./feature_store:/app/feature_store
+    - mlflow_artifacts:/mlflow/artifacts
+    - ./.git:/app/.git:ro
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -8,7 +31,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-    volumes: [ postgres_data:/var/lib/postgresql/data ]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d
     ports: [ "5432:5432" ]
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER}" ]
@@ -43,6 +68,7 @@ services:
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
+      RELOAD_SECRET: ${RELOAD_SECRET}
     ports: [ "8000:8000" ]
     volumes:
       - ./feature_store:/app/feature_store
@@ -61,6 +87,49 @@ services:
       - mlflow_artifacts:/mlflow/artifacts
       - ./.git:/app/.git:ro
     profiles: [ training ]
+
+  # ── Airflow ────────────────────────────────────────────────────────────────
+
+  airflow-init:
+    <<: *airflow-common
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      PYTHONPATH: /app
+    command: airflow db migrate
+    profiles: [ airflow-init ]
+
+  airflow-webserver:
+    <<: *airflow-common
+    ports: [ "8080:8080" ]
+    command: airflow webserver
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+
+  airflow-scheduler:
+    <<: *airflow-common
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "30"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
+      API_URL: http://api:8000
+      RELOAD_SECRET: ${RELOAD_SECRET}
+      PYTHONPATH: /app
+    command: airflow scheduler
 
 volumes:
   postgres_data:
