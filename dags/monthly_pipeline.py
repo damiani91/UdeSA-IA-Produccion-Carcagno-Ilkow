@@ -19,9 +19,7 @@ Architecture note:
 
 from __future__ import annotations
 
-import os
-import sys
-from datetime import datetime, date
+from datetime import datetime
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator, ExternalPythonOperator
@@ -29,23 +27,14 @@ from airflow.operators.python import PythonOperator, ExternalPythonOperator
 PROJECT_PYTHON = "/home/airflow/project-venv/bin/python"
 
 
-# ─── helpers ──────────────────────────────────────────────────────────────────
-
-def _first_day_of_prev_month(logical_date: date) -> str:
-    """Return YYYY-MM-01 for the month before logical_date."""
-    if logical_date.month == 1:
-        return f"{logical_date.year - 1}-12-01"
-    return f"{logical_date.year}-{logical_date.month - 1:02d}-01"
-
-
-def _ensure_app_in_path():
-    if "/app" not in sys.path:
-        sys.path.insert(0, "/app")
-
-
 # ─── task callables ───────────────────────────────────────────────────────────
 # download_data and reload_api only need `requests` → PythonOperator (Airflow env)
 # All ML tasks need feast/mlflow/sklearn → ExternalPythonOperator (project venv)
+#
+# NOTE: ExternalPythonOperator serializa solo el callable (con dill) y lo ejecuta
+# en un subprocess fresco — helpers a nivel módulo NO viajan. Por eso cada task
+# que corre en el project venv inlinea su lógica (sys.path, fecha) en lugar de
+# llamar a un helper compartido.
 
 def task_download_data(**context):
     """Download fresh produccion.csv and pozos.csv from datos.gob.ar."""
@@ -76,31 +65,48 @@ def task_download_data(**context):
         print(f"  Saved {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
 
 
-def task_prepare_offline_store(**context):
-    _ensure_app_in_path()
-    logical_date = context["logical_date"].date()
-    training_date = _first_day_of_prev_month(logical_date)
+def task_prepare_offline_store(logical_date_str: str):
+    import sys
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
+    y, m, _ = logical_date_str.split("-")
+    y, m = int(y), int(m)
+    training_date = f"{y - 1}-12-01" if m == 1 else f"{y}-{m - 1:02d}-01"
     print(f"prepare_offline_store up_to_date={training_date}")
     from scripts.populate_feature_store import prepare_offline_store
     prepare_offline_store(up_to_date=training_date)
 
 
-def task_apply_feast(**context):
-    _ensure_app_in_path()
+def task_apply_feast():
+    import os
+    import sys
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
+    # `apply_feast()` invoca el binario `feast` vía subprocess. Está en el venv
+    # del proyecto, que no está en el PATH heredado del scheduler de Airflow.
+    venv_bin = "/home/airflow/project-venv/bin"
+    if venv_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = f"{venv_bin}:{os.environ.get('PATH', '')}"
     from scripts.populate_feature_store import apply_feast
     apply_feast()
 
 
-def task_populate_online_store(**context):
-    _ensure_app_in_path()
+def task_populate_online_store():
+    import sys
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
     from scripts.populate_feature_store import populate_online_store
     populate_online_store()
 
 
-def task_train_model(**context):
-    _ensure_app_in_path()
-    logical_date = context["logical_date"].date()
-    training_date = _first_day_of_prev_month(logical_date)
+def task_train_model(logical_date_str: str) -> str:
+    import os
+    import sys
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
+    y, m, _ = logical_date_str.split("-")
+    y, m = int(y), int(m)
+    training_date = f"{y - 1}-12-01" if m == 1 else f"{y}-{m - 1:02d}-01"
     print(f"train_model training_date={training_date}")
 
     from src.training_pipeline.train import train_model
@@ -110,13 +116,15 @@ def task_train_model(**context):
     if run_id is None:
         raise RuntimeError("train_model returned None — training failed.")
 
-    context["ti"].xcom_push(key="run_id", value=run_id)
     print(f"Training completed. run_id={run_id}")
+    return run_id  # auto-pushed to XCom as 'return_value'
 
 
-def task_promote_model(**context):
-    _ensure_app_in_path()
-    run_id = context["ti"].xcom_pull(task_ids="train_model", key="run_id")
+def task_promote_model(run_id: str):
+    import os
+    import sys
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
     print(f"Promoting run_id={run_id} to Production")
 
     from src.training_pipeline.registry import promote_model_to_production
@@ -126,6 +134,7 @@ def task_promote_model(**context):
 
 def task_reload_api(**context):
     """Call the API /admin/reload endpoint so it picks up the new model."""
+    import os
     import requests
     api_url = os.environ.get("API_URL", "http://api:8000")
     reload_secret = os.environ.get("RELOAD_SECRET", "changeme-reload")
@@ -162,6 +171,7 @@ with DAG(
         task_id="prepare_offline_store",
         python=PROJECT_PYTHON,
         python_callable=task_prepare_offline_store,
+        op_kwargs={"logical_date_str": "{{ ds }}"},
     )
 
     t3 = ExternalPythonOperator(
@@ -180,12 +190,14 @@ with DAG(
         task_id="train_model",
         python=PROJECT_PYTHON,
         python_callable=task_train_model,
+        op_kwargs={"logical_date_str": "{{ ds }}"},
     )
 
     t6 = ExternalPythonOperator(
         task_id="promote_model",
         python=PROJECT_PYTHON,
         python_callable=task_promote_model,
+        op_kwargs={"run_id": "{{ ti.xcom_pull(task_ids='train_model') }}"},
     )
 
     t7 = PythonOperator(
