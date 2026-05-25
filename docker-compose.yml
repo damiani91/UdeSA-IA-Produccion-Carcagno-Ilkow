@@ -12,6 +12,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
     AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /app/dags
     MLFLOW_TRACKING_URI: http://mlflow:5000
     PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
     API_URL: http://api:8000
@@ -21,7 +22,6 @@ x-airflow-common: &airflow-common
     - ./dags:/app/dags
     - ./data:/app/data
     - ./feature_store:/app/feature_store
-    - mlflow_artifacts:/mlflow/artifacts
     - ./.git:/app/.git:ro
 
 services:
@@ -54,6 +54,7 @@ services:
       --default-artifact-root /mlflow/artifacts
       --host 0.0.0.0
       --port 5000
+      --serve-artifacts
       --allowed-hosts *
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')" ]
@@ -100,13 +101,14 @@ services:
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /app/dags
       PYTHONPATH: /app
     command: airflow db migrate
     profiles: [ airflow-init ]
 
   airflow-webserver:
     <<: *airflow-common
-    ports: [ "8080:8080" ]
+    ports: [ "8081:8080" ]
     command: airflow webserver
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
@@ -123,6 +125,7 @@ services:
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /app/dags
       AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "30"
       MLFLOW_TRACKING_URI: http://mlflow:5000
       PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
