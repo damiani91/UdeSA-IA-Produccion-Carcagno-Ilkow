@@ -10,4 +10,7 @@ COPY feature_store/ ./feature_store/
 
 ENV PYTHONPATH=/app
 
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Sprint 3: la API se sirve detrás de Ray Serve (ver src/api/serve_app.py).
+# El comando del compose lo sobrescribe; este CMD queda como fallback razonable.
+CMD ["serve", "run", "--host", "0.0.0.0", "--port", "8000", "src.api.serve_app:forecast_app"]
+

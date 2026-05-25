@@ -1,6 +1,32 @@
 # docker-compose.yml
 version: "3.9"
 
+# Configuración común a todos los servicios de Airflow.
+# LocalExecutor + Postgres (no SQLite) para soportar paralelismo real (ver plan §3.1).
+x-airflow-common: &airflow-common
+  build: { context: ., dockerfile: docker/airflow.Dockerfile }
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
+    PROJECT_ROOT: /opt/airflow/project
+    PYTHONPATH: /opt/airflow/project
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./data:/opt/airflow/project/data
+    - ./feature_store:/opt/airflow/project/feature_store
+    - mlflow_artifacts:/mlflow/artifacts
+  depends_on:
+    airflow-postgres:
+      condition: service_healthy
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -43,10 +69,17 @@ services:
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
-    ports: [ "8000:8000" ]
+      RAY_DEDUP_LOGS: "0"
+    ports:
+      - "8000:8000"   # FastAPI vía Ray Serve ingress
+      - "8265:8265"   # Ray dashboard
     volumes:
       - ./feature_store:/app/feature_store
       - mlflow_artifacts:/mlflow/artifacts
+    # Ray Serve corre el deployment definido en src.api.serve_app (Sprint 3).
+    command: >
+      serve run --host 0.0.0.0 --port 8000
+      src.api.serve_app:forecast_app
 
   training:
     build: { context: ., dockerfile: docker/training.Dockerfile }
@@ -62,6 +95,56 @@ services:
       - ./.git:/app/.git:ro
     profiles: [ training ]
 
+  # ===== Airflow =====
+  airflow-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes: [ airflow_postgres_data:/var/lib/postgresql/data ]
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U airflow" ]
+      interval: 5s
+      retries: 5
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    # Migra la metastore + crea un usuario admin. Idempotente: re-correr no rompe.
+    command:
+      - -c
+      - |
+        airflow db migrate && \
+        airflow users create \
+          --username admin --password admin \
+          --firstname Admin --lastname User \
+          --role Admin --email admin@example.com || true
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports: [ "8080:8080" ]
+    depends_on:
+      airflow-postgres: { condition: service_healthy }
+      airflow-init: { condition: service_completed_successfully }
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/health" ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-postgres: { condition: service_healthy }
+      airflow-init: { condition: service_completed_successfully }
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   mlflow_artifacts:
+  airflow_postgres_data:
