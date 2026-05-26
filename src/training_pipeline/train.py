@@ -37,7 +37,7 @@ TARGET = "target"
 def train_model(
     training_date: str,
     mlflow_tracking_uri: str = "http://mlflow:5000",
-    experiment_name: str = "well_production_forecast",
+    experiment_name: str = "well_production_forecast_v2",
     model_type: str = "gradient_boosting",
     model_params: dict | None = None,
 ) -> str | None:
@@ -47,6 +47,14 @@ def train_model(
     mlflow.sklearn.autolog() + log_param/log_metric manual.
     """
     mlflow.set_tracking_uri(mlflow_tracking_uri)
+
+    # Ensure experiment uses HTTP artifact proxy (mlflow-artifacts:/ URI).
+    # Without this, MLflow creates the experiment with a local filesystem path
+    # as artifact_location, which is inaccessible from the Airflow container.
+    _client = mlflow.MlflowClient(mlflow_tracking_uri)
+    if _client.get_experiment_by_name(experiment_name) is None:
+        _client.create_experiment(experiment_name, artifact_location="mlflow-artifacts:/")
+
     mlflow.set_experiment(experiment_name)
 
     try:
