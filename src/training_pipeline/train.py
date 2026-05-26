@@ -126,6 +126,13 @@ def train_model(
                 registered_model_name="well_production_model",
             )
 
+            # Snapshot del dataset de training como artefacto.
+            # Lo usa el próximo ciclo del DAG como reference para drift monitoring
+            # (compara distribuciones de features y residuos contra este baseline).
+            ref_path = "/tmp/reference_dataset.parquet"
+            training_df.to_parquet(ref_path, index=False)
+            mlflow.log_artifact(ref_path, artifact_path="reference")
+
             # Feature importances como artefacto
             import matplotlib; matplotlib.use("Agg")
             import matplotlib.pyplot as plt
