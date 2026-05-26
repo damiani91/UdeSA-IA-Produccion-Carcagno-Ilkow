@@ -120,6 +120,27 @@ def task_train_model(logical_date_str: str) -> str:
     return run_id  # auto-pushed to XCom as 'return_value'
 
 
+def task_generate_drift_report(logical_date_str: str, new_run_id: str):
+    import os
+    import sys
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
+    y, m, _ = logical_date_str.split("-")
+    y, m = int(y), int(m)
+    training_date = f"{y - 1}-12-01" if m == 1 else f"{y}-{m - 1:02d}-01"
+    print(f"generate_drift_report training_date={training_date} new_run_id={new_run_id}")
+
+    from scripts.generate_drift_report import generate_drift_report
+    mlflow_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+    result = generate_drift_report(
+        training_date=training_date,
+        new_run_id=new_run_id,
+        mlflow_tracking_uri=mlflow_uri,
+    )
+    if result is None:
+        print("generate_drift_report skipped (no baseline o ventana vacía)")
+
+
 def task_promote_model(run_id: str):
     import os
     import sys
@@ -193,6 +214,16 @@ with DAG(
         op_kwargs={"logical_date_str": "{{ ds }}"},
     )
 
+    t_drift = ExternalPythonOperator(
+        task_id="generate_drift_report",
+        python=PROJECT_PYTHON,
+        python_callable=task_generate_drift_report,
+        op_kwargs={
+            "logical_date_str": "{{ ds }}",
+            "new_run_id": "{{ ti.xcom_pull(task_ids='train_model') }}",
+        },
+    )
+
     t6 = ExternalPythonOperator(
         task_id="promote_model",
         python=PROJECT_PYTHON,
@@ -205,4 +236,4 @@ with DAG(
         python_callable=task_reload_api,
     )
 
-    t1 >> t2 >> t3 >> t4 >> t5 >> t6 >> t7
+    t1 >> t2 >> t3 >> t4 >> t5 >> t_drift >> t6 >> t7
