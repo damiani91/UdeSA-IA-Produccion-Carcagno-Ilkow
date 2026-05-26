@@ -105,7 +105,7 @@ app = _build_fastapi()
 
 
 @serve.deployment(
-    num_replicas=2,
+    num_replicas=1,
     ray_actor_options={"num_cpus": 1},
 )
 @serve.ingress(app)
