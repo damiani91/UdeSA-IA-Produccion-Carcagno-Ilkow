@@ -132,7 +132,11 @@ services:
       API_URL: http://api:8000
       RELOAD_SECRET: ${RELOAD_SECRET}
       PYTHONPATH: /app
-    command: airflow scheduler
+    user: root
+    command: >
+      bash -c "mkdir -p /app/feature_store/data /app/data/raw &&
+               chmod -R 777 /app/feature_store /app/data &&
+               exec gosu airflow airflow scheduler"
 
 volumes:
   postgres_data:
