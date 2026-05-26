@@ -105,13 +105,15 @@ app = _build_fastapi()
 
 
 @serve.deployment(
-    num_replicas=4,
+    num_replicas=1,
     ray_actor_options={"num_cpus": 1},
 )
 @serve.ingress(app)
 class ForecastDeployment:
     def __init__(self):
-        # Runs once per replica. Ray Serve does not call FastAPI lifespan,
-        # so we initialize shared state here instead.
-        app.state.forecast_service = ForecastService()
-        app.state.features_df = pd.read_parquet(FEATURES_PATH)
+        # Runs once per replica. We write to the process-level _state singleton
+        # instead of app.state: Ray Serve may pickle/deserialize the app object,
+        # making app.state identity unreliable across the ingress boundary.
+        from src.api import _state
+        _state.forecast_service = ForecastService()
+        _state.features_df = pd.read_parquet(FEATURES_PATH)
