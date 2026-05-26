@@ -70,7 +70,11 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
       RELOAD_SECRET: ${RELOAD_SECRET}
-    ports: [ "8000:8000" ]
+      RAY_NUM_CPUS: "4"
+    ports:
+      - "8000:8000"
+      - "8265:8265"   # Ray dashboard
+    shm_size: "2gb"   # Ray object store needs shared memory
     volumes:
       - ./feature_store:/app/feature_store
       - mlflow_artifacts:/mlflow/artifacts
