@@ -128,6 +128,12 @@ def _evidently_html(ref: pd.DataFrame, cur: pd.DataFrame, output_path: str) -> d
     from evidently.metric_preset import DataDriftPreset
     from evidently import ColumnMapping
 
+    # Keep only model-relevant columns so Evidently doesn't try to align
+    # extra columns (e.g. event_timestamp in ref vs fecha in cur).
+    keep = FEATURE_COLS + [TARGET, "prediction"]
+    ref = ref[[c for c in keep if c in ref.columns]].copy()
+    cur = cur[[c for c in keep if c in cur.columns]].copy()
+
     mapping = ColumnMapping(
         target=TARGET,
         prediction="prediction",
