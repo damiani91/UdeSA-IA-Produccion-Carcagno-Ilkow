@@ -1,0 +1,239 @@
+"""
+Monthly ML pipeline for oil & gas well production forecasting.
+
+Schedule: 10th of each month at 06:00 UTC.
+Training date: first day of the previous month (auto-computed from logical_date).
+
+Task chain:
+    download_data >> prepare_offline_store >> apply_feast >> populate_online_store
+    >> train_model >> promote_model >> reload_api
+
+Architecture note:
+    ML tasks (prepare → train → promote) run via ExternalPythonOperator in a
+    separate venv (/home/airflow/project-venv) that has SQLAlchemy 2.x, MLflow,
+    Feast, and scikit-learn. This avoids conflicting with Airflow's own
+    SQLAlchemy 1.4.x installation.
+    Non-ML tasks (download_data, reload_api) use PythonOperator since they only
+    need `requests`, which is already available in Airflow's environment.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator, ExternalPythonOperator
+
+PROJECT_PYTHON = "/home/airflow/project-venv/bin/python"
+
+
+# ─── task callables ───────────────────────────────────────────────────────────
+# download_data and reload_api only need `requests` → PythonOperator (Airflow env)
+# All ML tasks need feast/mlflow/sklearn → ExternalPythonOperator (project venv)
+#
+# NOTE: ExternalPythonOperator serializa solo el callable (con dill) y lo ejecuta
+# en un subprocess fresco — helpers a nivel módulo NO viajan. Por eso cada task
+# que corre en el project venv inlinea su lógica (sys.path, fecha) en lugar de
+# llamar a un helper compartido.
+
+def task_download_data(**context):
+    """Download fresh produccion.csv and pozos.csv from datos.gob.ar."""
+    from pathlib import Path
+    import requests
+
+    URLS = {
+        "produccion": (
+            "http://datos.energia.gob.ar/dataset/c846e79c-026c-4040-897f-1ad3543b407c"
+            "/resource/b5b58cdc-9e07-41f9-b392-fb9ec68b0725/download/produccion.csv"
+        ),
+        "pozos": (
+            "http://datos.energia.gob.ar/dataset/c846e79c-026c-4040-897f-1ad3543b407c"
+            "/resource/cbfa4d79-ffb3-4096-bab5-eb0dde9a8385/download/pozos.csv"
+        ),
+    }
+    raw_dir = Path("/app/data/raw")
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    for name, url in URLS.items():
+        dest = raw_dir / f"{name}.csv"
+        print(f"Downloading {url} → {dest}")
+        resp = requests.get(url, stream=True, timeout=300)
+        resp.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+        print(f"  Saved {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
+
+
+def task_prepare_offline_store(logical_date_str: str):
+    import sys
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
+    y, m, _ = logical_date_str.split("-")
+    y, m = int(y), int(m)
+    training_date = f"{y - 1}-12-01" if m == 1 else f"{y}-{m - 1:02d}-01"
+    print(f"prepare_offline_store up_to_date={training_date}")
+    from scripts.populate_feature_store import prepare_offline_store
+    prepare_offline_store(up_to_date=training_date)
+
+
+def task_apply_feast():
+    import os
+    import sys
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
+    # `apply_feast()` invoca el binario `feast` vía subprocess. Está en el venv
+    # del proyecto, que no está en el PATH heredado del scheduler de Airflow.
+    venv_bin = "/home/airflow/project-venv/bin"
+    if venv_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = f"{venv_bin}:{os.environ.get('PATH', '')}"
+    from scripts.populate_feature_store import apply_feast
+    apply_feast()
+
+
+def task_populate_online_store():
+    import sys
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
+    from scripts.populate_feature_store import populate_online_store
+    populate_online_store()
+
+
+def task_train_model(logical_date_str: str) -> str:
+    import os
+    import sys
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
+    y, m, _ = logical_date_str.split("-")
+    y, m = int(y), int(m)
+    training_date = f"{y - 1}-12-01" if m == 1 else f"{y}-{m - 1:02d}-01"
+    print(f"train_model training_date={training_date}")
+
+    from src.training_pipeline.train import train_model
+    mlflow_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+    run_id = train_model(training_date=training_date, mlflow_tracking_uri=mlflow_uri)
+
+    if run_id is None:
+        raise RuntimeError("train_model returned None — training failed.")
+
+    print(f"Training completed. run_id={run_id}")
+    return run_id  # auto-pushed to XCom as 'return_value'
+
+
+def task_generate_drift_report(logical_date_str: str, new_run_id: str):
+    import os
+    import sys
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
+    y, m, _ = logical_date_str.split("-")
+    y, m = int(y), int(m)
+    training_date = f"{y - 1}-12-01" if m == 1 else f"{y}-{m - 1:02d}-01"
+    print(f"generate_drift_report training_date={training_date} new_run_id={new_run_id}")
+
+    from scripts.generate_drift_report import generate_drift_report
+    mlflow_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+    result = generate_drift_report(
+        training_date=training_date,
+        new_run_id=new_run_id,
+        mlflow_tracking_uri=mlflow_uri,
+    )
+    if result is None:
+        print("generate_drift_report skipped (no baseline o ventana vacía)")
+
+
+def task_promote_model(run_id: str):
+    import os
+    import sys
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
+    print(f"Promoting run_id={run_id} to Production")
+
+    from src.training_pipeline.registry import promote_model_to_production
+    mlflow_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+    promote_model_to_production(run_id=run_id, mlflow_tracking_uri=mlflow_uri)
+
+
+def task_reload_api(**context):
+    """Call the API /admin/reload endpoint so it picks up the new model."""
+    import os
+    import requests
+    api_url = os.environ.get("API_URL", "http://api:8000")
+    reload_secret = os.environ.get("RELOAD_SECRET", "changeme-reload")
+    resp = requests.post(
+        f"{api_url}/admin/reload",
+        headers={"X-Reload-Secret": reload_secret},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    print(f"API reload: {resp.status_code} {resp.json()}")
+
+
+# ─── DAG definition ───────────────────────────────────────────────────────────
+
+with DAG(
+    dag_id="monthly_well_production_pipeline",
+    description=(
+        "Pipeline mensual: descarga datos → features → entrena modelo → "
+        "promueve a Production → recarga API"
+    ),
+    schedule_interval="0 6 10 * *",
+    start_date=datetime(2025, 1, 10),
+    catchup=False,
+    max_active_runs=1,
+    tags=["oil-gas", "ml", "monthly"],
+) as dag:
+
+    t1 = PythonOperator(
+        task_id="download_data",
+        python_callable=task_download_data,
+    )
+
+    t2 = ExternalPythonOperator(
+        task_id="prepare_offline_store",
+        python=PROJECT_PYTHON,
+        python_callable=task_prepare_offline_store,
+        op_kwargs={"logical_date_str": "{{ ds }}"},
+    )
+
+    t3 = ExternalPythonOperator(
+        task_id="apply_feast",
+        python=PROJECT_PYTHON,
+        python_callable=task_apply_feast,
+    )
+
+    t4 = ExternalPythonOperator(
+        task_id="populate_online_store",
+        python=PROJECT_PYTHON,
+        python_callable=task_populate_online_store,
+    )
+
+    t5 = ExternalPythonOperator(
+        task_id="train_model",
+        python=PROJECT_PYTHON,
+        python_callable=task_train_model,
+        op_kwargs={"logical_date_str": "{{ ds }}"},
+    )
+
+    t_drift = ExternalPythonOperator(
+        task_id="generate_drift_report",
+        python=PROJECT_PYTHON,
+        python_callable=task_generate_drift_report,
+        op_kwargs={
+            "logical_date_str": "{{ ds }}",
+            "new_run_id": "{{ ti.xcom_pull(task_ids='train_model') }}",
+        },
+    )
+
+    t6 = ExternalPythonOperator(
+        task_id="promote_model",
+        python=PROJECT_PYTHON,
+        python_callable=task_promote_model,
+        op_kwargs={"run_id": "{{ ti.xcom_pull(task_ids='train_model') }}"},
+    )
+
+    t7 = PythonOperator(
+        task_id="reload_api",
+        python_callable=task_reload_api,
+    )
+
+    t1 >> t2 >> t3 >> t4 >> t5 >> t_drift >> t6 >> t7

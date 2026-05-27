@@ -1,0 +1,45 @@
+"""Uso: python -m scripts.train --date 2024-12-01"""
+
+import sys
+from pathlib import Path
+
+# Agrega la raíz del proyecto al path para poder importar scripts.* y src.*
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import argparse
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date", required=True)
+    _root = Path(__file__).resolve().parent.parent
+    parser.add_argument("--raw-data", default=str(_root / "data" / "raw" / "produccion.csv"))
+    args = parser.parse_args()
+
+    # 1. Feature Pipeline
+    from scripts.populate_feature_store import (
+        prepare_offline_store, apply_feast, populate_online_store,
+    )
+    print(f"=== Feature Pipeline (hasta {args.date}) ===")
+    prepare_offline_store(up_to_date=args.date)
+    apply_feast()
+    populate_online_store()
+
+    # 2. Training Pipeline
+    from src.training_pipeline.train import train_model
+    from src.training_pipeline.registry import promote_model_to_production
+    print("=== Training Pipeline ===")
+    run_id = train_model(training_date=args.date)
+    print(f"Run ID: {run_id}")
+
+    # 3. Promover modelo a Production en MLflow Registry
+    if run_id:
+        print("=== Promoviendo modelo a Production ===")
+        promote_model_to_production(run_id=run_id)
+        print("=== Completo ===")
+    else:
+        print("=== Training falló, no se promovió el modelo ===")
+
+
+if __name__ == "__main__":
+    main()
